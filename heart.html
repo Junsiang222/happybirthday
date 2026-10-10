@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>I love you</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#000;overflow:hidden;font-family:"Segoe UI","PingFang TC","Microsoft JhengHei",system-ui,sans-serif}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+  canvas:active{cursor:grabbing}
+  #hint{position:fixed;left:0;right:0;bottom:max(22px,env(safe-area-inset-bottom));z-index:4;text-align:center;color:#fff;
+    font-size:13px;letter-spacing:.18em;opacity:0;pointer-events:none;transition:opacity 1.4s}
+  #hint.on{opacity:.55}
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="用彩色文字組成的愛心動畫"></canvas>
+<div id="hint">輕點螢幕 · 放出光波</div>
+
+<script>
+/* ================= 想改的都在這裡 ================= */
+const CONFIG = {
+  words: ["I love you", "Love you", "I love you", "Love you"],   // 愛心上的字
+  center: [],          // 愛心中間的句子(留空 = 不顯示;想加就填,例如 ["Love you forever"])
+  centerHold: 3.6,     // 每句停留秒數
+  layers: 6,           // 愛心層數
+  speed: 0.045,        // 文字沿著愛心流動的速度
+  spin: 0.42,          // 愛心擺動速度(0 = 不轉)
+  swing: 1.9,          // 擺動幅度(弧度,>1.57 會轉到背面,字會鏡像)
+  fontPx: 0.026,       // 字的大小(相對於畫面短邊)
+  rainbowSpeed: 38,    // 顏色流動速度(度/秒)
+  beat: true,          // 心跳
+  intro: true,         // 開場:字從四面八方飛來
+  trail: true,         // 殘影
+  particles: 64        // 飄升的光點和小愛心
+};
+
+/* ================= 基礎 ================= */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const FONT = '"Segoe UI","PingFang TC","Microsoft JhengHei",system-ui,sans-serif';
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const ease = k => 1 - Math.pow(1 - k, 3);
+let W, H, DPR, U;
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  U = Math.min(W, H);
+  build();
+}
+
+/* ================= 愛心曲線 ================= */
+const curve = [];
+(function(){
+  const SAMPLES = 900, pts = [];
+  for(let i = 0; i <= SAMPLES; i++){
+    const t = i / SAMPLES * Math.PI * 2;
+    pts.push([16 * Math.pow(Math.sin(t), 3) / 17,
+      -(13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t)) / 17]);
+  }
+  let acc = 0; curve.push({x: pts[0][0], y: pts[0][1], s: 0});
+  for(let i = 1; i < pts.length; i++){
+    acc += Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+    curve.push({x: pts[i][0], y: pts[i][1], s: acc});
+  }
+  curve.forEach(p => p.s /= acc);
+  curve.total = acc;
+})();
+function sampleCurve(s){
+  s = ((s % 1) + 1) % 1;
+  let lo = 0, hi = curve.length - 1;
+  while(hi - lo > 1){ const m = (lo + hi) >> 1; curve[m].s <= s ? lo = m : hi = m; }
+  const a = curve[lo], b = curve[hi], k = (s - a.s) / ((b.s - a.s) || 1);
+  return {x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k)};
+}
+
+/* ================= 圖層與文字 ================= */
+let layers = [];
+const HEART_R = .38;                 // 愛心大小(相對畫面短邊)
+function build(){
+  layers = [];
+  const fs = Math.max(11, U * CONFIG.fontPx);
+  ctx.font = `600 ${fs}px ${FONT}`;
+  const maxW = Math.max(...CONFIG.words.map(w => ctx.measureText(w).width));
+  for(let L = 0; L < CONFIG.layers; L++){
+    const f = L / Math.max(1, CONFIG.layers - 1);
+    const scale = 1 - f * .34;
+    const n = Math.max(8, Math.floor(curve.total * U * HEART_R * scale / (maxW * 1.2)));
+    const words = [];
+    for(let i = 0; i < n; i++) words.push({
+      t: CONFIG.words[(i + L) % CONFIG.words.length],
+      u: i / n, hue0: i / n * 360 + L * 47,
+      rx: Math.random(), ry: Math.random(), rang: rnd(-3, 3),     // 開場起點
+      delay: rnd(0, 1.5)
+    });
+    layers.push({scale, z: (f - .5) * .9, rot: (-.5 + f) * .22, words, dir: L % 2 ? -1 : 1, fs: fs * (1 - f * .16)});
+  }
+}
+
+/* ================= 飄升光點與小愛心 ================= */
+let parts = [];
+function newPart(init){
+  return {x: Math.random(), y: init ? Math.random() : 1.05 + Math.random() * .1,
+    vy: rnd(.02, .07), sway: rnd(.01, .04), p: rnd(0, 6.28), r: rnd(1, 2.6),
+    h: rnd(0, 360), heart: Math.random() < .28, size: rnd(9, 17)};
+}
+function initParts(){ parts = Array.from({length: CONFIG.particles}, () => newPart(true)); }
+
+/* ================= 點擊光波 ================= */
+let ripples = [];
+const RIPPLE_SPEED = .95, RIPPLE_LIFE = 1.8;
+
+/* ================= 操作 ================= */
+let yawOff = 0, tiltOff = 0, vel = 0, dragging = false, px = 0, py = 0, moved = 0;
+cv.addEventListener('pointerdown', e => {
+  dragging = true; px = e.clientX; py = e.clientY; moved = 0; cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => {
+  if(!dragging) return;
+  const dx = e.clientX - px, dy = e.clientY - py; px = e.clientX; py = e.clientY;
+  moved += Math.abs(dx) + Math.abs(dy);
+  yawOff += dx * .008; vel = dx * .008;
+  tiltOff = clamp(tiltOff + dy * .004, -.6, .6);
+});
+cv.addEventListener('pointerup', e => {
+  dragging = false;
+  if(moved < 8){ ripples.push({x: e.clientX, y: e.clientY, t0: time}); }
+});
+cv.addEventListener('pointercancel', () => dragging = false);
+
+const hint = document.getElementById('hint');
+function hintOff(){ hint.classList.remove('on'); }
+cv.addEventListener('pointerdown', hintOff);
+
+/* ================= 主迴圈 ================= */
+let last = performance.now(), time = 0;
+const INTRO_DUR = 2.4;
+function frame(now){
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  if(!reduce) time += dt;
+  vel *= .94; if(!dragging) yawOff += vel;
+
+  // 背景 + 殘影
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = (CONFIG.trail && !reduce) ? 'rgba(0,0,0,.6)' : '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  const gh = (time * CONFIG.rainbowSpeed) % 360;
+  const g = ctx.createRadialGradient(W/2, H*.5, 0, W/2, H*.5, U*.6);
+  g.addColorStop(0, `hsla(${gh},90%,55%,.05)`);
+  g.addColorStop(.6, `hsla(${(gh+90)%360},90%,50%,.018)`);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  ctx.globalCompositeOperation = 'lighter';
+
+  // 飄升光點與小愛心(在愛心後面)
+  for(let i = 0; i < parts.length; i++){
+    const p = parts[i];
+    p.y -= p.vy * dt;
+    const x = (p.x + Math.sin(time * .8 + p.p) * p.sway) * W, y = p.y * H;
+    if(p.y < -.06){ parts[i] = newPart(false); continue; }
+    const a = clamp(Math.min(p.y * 3, (1.05 - p.y) * 4)) * .55;
+    const hue = (p.h + time * CONFIG.rainbowSpeed * .6) % 360;
+    if(p.heart){
+      ctx.font = `${p.size}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = `hsla(${hue},100%,70%,${a})`; ctx.fillText('♥', x, y);
+    }else{
+      ctx.fillStyle = `hsla(${hue},100%,75%,${a})`;
+      ctx.beginPath(); ctx.arc(x, y, p.r, 0, 6.2832); ctx.fill();
+      ctx.fillStyle = `hsla(${hue},100%,70%,${a * .18})`;
+      ctx.beginPath(); ctx.arc(x, y, p.r * 3.2, 0, 6.2832); ctx.fill();
+    }
+  }
+
+  // 3D 參數
+  const yaw = Math.sin(time * CONFIG.spin) * CONFIG.swing + yawOff;
+  const tilt = .14 + tiltOff + Math.sin(time * .5) * .05;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), ct = Math.cos(tilt), st = Math.sin(tilt);
+  const beat = CONFIG.beat ? 1 + .035 * Math.pow(Math.max(0, Math.sin(time * 3.2)), 6) : 1;
+  const base = U * HEART_R * beat, D = 3, cx = W / 2, cyc = H * .5;
+  const mirror = cy < 0;
+  const proj = (X, Y, Z) => {
+    const x1 = X * cy - Z * sy, z1 = X * sy + Z * cy;
+    const y2 = Y * ct - z1 * st, z2 = Y * st + z1 * ct;
+    const k = D / (D + z2);
+    return [cx + x1 * base * k, cyc + y2 * base * k, k, z2];
+  };
+
+  // 收集文字
+  const items = [];
+  for(const Ly of layers){
+    const cr = Math.cos(Ly.rot), sr = Math.sin(Ly.rot);
+    for(const w of Ly.words){
+      const s = w.u + time * CONFIG.speed * Ly.dir;
+      const p = sampleCurve(s), q = sampleCurve(s + .002 * Ly.dir);
+      const x = p.x * Ly.scale, y = p.y * Ly.scale, qx = q.x * Ly.scale, qy = q.y * Ly.scale;
+      const a = proj(x * cr - y * sr, x * sr + y * cr, Ly.z);
+      const b = proj(qx * cr - qy * sr, qx * sr + qy * cr, Ly.z);
+      let ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+      if(Ly.dir < 0) ang += Math.PI;
+      if(Math.cos(ang) < 0) ang += Math.PI;
+      let X = a[0], Y = a[1], sz = 1, al = 1;
+      if(CONFIG.intro && !reduce){
+        const pr = ease(clamp((time - w.delay) / INTRO_DUR));
+        X = lerp(w.rx * W, X, pr); Y = lerp(w.ry * H, Y, pr);
+        ang = lerp(w.rang, ang, pr); sz = .35 + .65 * pr; al = .15 + .85 * pr;
+      }
+      items.push({t: w.t, x: X, y: Y, k: a[2], d: a[3], ang, fs: Ly.fs * sz, al, hue: w.hue0});
+    }
+  }
+  items.sort((m, n) => n.d - m.d);
+
+  // 光波圈
+  ripples = ripples.filter(r => time - r.t0 < RIPPLE_LIFE);
+  for(const r of ripples){
+    const age = time - r.t0, rad = age * U * RIPPLE_SPEED, life = 1 - age / RIPPLE_LIFE;
+    ctx.strokeStyle = `hsla(${(gh + age * 120) % 360},100%,70%,${.5 * life})`;
+    ctx.lineWidth = 2 + 4 * life;
+    ctx.beginPath(); ctx.arc(r.x, r.y, rad, 0, 6.2832); ctx.stroke();
+  }
+
+  // 畫文字
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for(const it of items){
+    // 光波掃過 → 變亮變大
+    let boost = 0;
+    for(const r of ripples){
+      const age = time - r.t0, rad = age * U * RIPPLE_SPEED, life = 1 - age / RIPPLE_LIFE;
+      const d = Math.hypot(it.x - r.x, it.y - r.y) - rad, w = U * .07;
+      boost = Math.max(boost, Math.exp(-(d * d) / (w * w)) * life);
+    }
+    const far = clamp((it.d + .15) / .65);                 // 0 前面 → 1 後面
+    const fs = it.fs * it.k * (1 + boost * .35);
+    const alpha = clamp((1 - far * .62) * it.al + boost * .4);
+    const hue = (it.hue + time * CONFIG.rainbowSpeed) % 360;
+    const light = 66 + 8 * (1 - far) + boost * 22;
+    ctx.save();
+    ctx.translate(it.x, it.y); ctx.rotate(it.ang);
+    if(mirror) ctx.scale(-1, 1);
+    ctx.font = `600 ${fs}px ${FONT}`;
+    if(far > .3){                                          // 後方:假景深(重疊偏移的淡影)
+      const o = far * 1.6 * it.k;
+      ctx.fillStyle = `hsla(${hue},100%,${light}%,${alpha * .3})`;
+      ctx.fillText(it.t, -o, 0); ctx.fillText(it.t, o, 0); ctx.fillText(it.t, 0, o);
+    }
+    ctx.shadowColor = `hsla(${hue},100%,60%,${(.9 - far * .35) * alpha + boost * .4})`;
+    ctx.shadowBlur = (7 + far * 9 + boost * 14) * it.k;
+    ctx.fillStyle = `hsla(${hue},100%,${Math.min(92, light)}%,${alpha * (1 - far * .35)})`;
+    ctx.fillText(it.t, 0, 0);
+    ctx.restore();
+  }
+
+  // 中間輪流出現的句子
+  const t0 = CONFIG.intro && !reduce ? INTRO_DUR + 1.2 : 0.5;
+  if(CONFIG.center.length && time > t0){
+    const cycle = (time - t0) / CONFIG.centerHold, idx = Math.floor(cycle) % CONFIG.center.length, ph = cycle % 1;
+    const env = Math.sin(Math.PI * clamp(ph * 1.1, 0, 1));            // 淡入 → 淡出
+    const line = CONFIG.center[idx];
+    let fs = U * .062;
+    ctx.font = `400 ${fs}px ${FONT}`;
+    const tw = ctx.measureText(line).width, maxW = U * .46;
+    if(tw > maxW){ fs *= maxW / tw; }
+    ctx.save();
+    ctx.translate(cx, cyc - base * .05);
+    ctx.scale(.78 + .22 * Math.abs(cy), 1);
+    ctx.font = `400 ${fs}px ${FONT}`;
+    const hh = (gh + idx * 70) % 360;
+    ctx.shadowColor = `hsla(${hh},100%,65%,${.9 * env})`;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = `hsla(${hh},100%,86%,${.95 * env})`;
+    ctx.fillText(line, 0, 0);
+    ctx.restore();
+  }
+
+  requestAnimationFrame(frame);
+}
+
+addEventListener('resize', resize);
+resize(); initParts();
+setTimeout(() => hint.classList.add('on'), 3800);
+setTimeout(hintOff, 12000);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
